@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
-import 'screens/home_screen.dart'; // Or your initial routing screen
+import 'screens/attendance_screen.dart';
 import 'screens/login_screen.dart';
 
 void main() async {
@@ -30,7 +30,7 @@ class FaceAttendanceApp extends StatelessWidget {
       // 💡 FIX: Route directly to Login or Register instead of the old 4-button menu screen
       home: Supabase.instance.client.auth.currentSession == null
           ? const LoginScreen() // Shows the modern Login Screen gateway first
-          : const HomeScreen(), // Bypasses straight to Terminal if active session exists
+          : const AttendanceScreen(),
     );
   }
 }

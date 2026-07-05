@@ -1,6 +1,7 @@
 import 'package:uuid/uuid.dart';
 import '../models/registered_face.dart';
-import '../services/face_storage_service.dart';
+import 'face_ml_service.dart';
+import 'face_storage_service.dart';
 
 class RegistrationController {
   final FaceStorageService _storageService = FaceStorageService.instance;
@@ -49,28 +50,25 @@ class LoginVerificationController {
     required List<double> scannedFaceEmbedding,
   }) async {
     // 1. Fetch the original registered face profile array matrix from Supabase
+    print("🔍 Fetching registered embedding for: $email");
     List<double>? registeredEmbedding = await _storageService.getEmbeddingByEmail(email);
 
     if (registeredEmbedding == null) {
-      print("No user registration records matched this email profile.");
+      print("❌ No user registration records matched this email profile.");
       return false;
     }
 
-    // 2. Run Euclidean Distance comparison calculations using your ML utility
-    double distanceThreshold = 1.0; // Adjust this sensitivity parameter based on your TFLite model constraints
-    double calculatedDistance = calculateEuclideanDistance(scannedFaceEmbedding, registeredEmbedding);
+    print("✅ Retrieved registered embedding (${registeredEmbedding.length} dims), first 5: ${registeredEmbedding.take(5).toList()}");
+    print("📊 Scanned embedding (${scannedFaceEmbedding.length} dims), first 5: ${scannedFaceEmbedding.take(5).toList()}");
 
-    print("Calculated facial distance coefficient metric score: $calculatedDistance");
-    return calculatedDistance < distanceThreshold;
-  }
+    final similarityScore = FaceMlService.instance.cosineSimilarity(
+      scannedFaceEmbedding,
+      registeredEmbedding,
+    );
 
-  /// Basic Euclidean Distance helper algorithm framework
-  double calculateEuclideanDistance(List<double> v1, List<double> v2) {
-    double sum = 0.0;
-    for (int i = 0; i < v1.length; i++) {
-      double diff = v1[i] - v2[i];
-      sum += diff * diff;
-    }
-    return sum; // Returns the variance factor deviation score
+    final threshold = FaceMlService.matchThreshold;
+    final passed = similarityScore >= threshold;
+    print("🎯 Facial similarity score: $similarityScore (threshold: $threshold) → ${passed ? 'MATCH ✅' : 'NO MATCH ❌'}");
+    return passed;
   }
 }

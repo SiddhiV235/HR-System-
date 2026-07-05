@@ -183,4 +183,36 @@ Future<bool> registerEmployee({
       return [];
     }
   }
+
+  /// Logs the current employee session out of Supabase Auth
+  Future<void> signOutEmployee() async {
+    try {
+      await _client.auth.signOut();
+      print("✅ Session closed successfully.");
+    } catch (e) {
+      print("❌ Log Out Error: $e");
+      rethrow;
+    }
+  }
+
+  /// Overwrites the existing 192-length face vector embedding for the current user
+  Future<bool> updateFaceEmbedding(List<double> newFaceEmbedding) async {
+    try {
+      final user = _client.auth.currentUser;
+      if (user == null) return false;
+
+      print("⚡ Updating face embedding for User ID: ${user.id}...");
+
+      // Overwrites the existing profile row's embedding column matrix
+      await _client.from('profiles').update({
+        'face_embedding': newFaceEmbedding.map((e) => e.toDouble()).toList(),
+      }).eq('id', user.id);
+
+      print("✅ Face matrix updated successfully in cloud tables.");
+      return true;
+    } catch (e) {
+      print("❌ Update Face Service Error: $e");
+      return false;
+    }
+  }
 }

@@ -5,8 +5,6 @@ import 'dart:ui';
 import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
-// Make sure this points to your file containing FaceStorageService
-import 'face_storage_service.dart'; 
 
 /// Thrown for any expected failure during face extraction
 class FaceMlException implements Exception {
@@ -25,66 +23,93 @@ class FaceMlService {
   static const int embeddingSize = 192;
 
   /// Cosine-similarity threshold above which two embeddings are considered the same person.
-  static const double matchThreshold = 0.62;
+  static const double matchThreshold = 0.5;
 
   Interpreter? _interpreter;
-
-  final FaceDetector _faceDetector = FaceDetector(
-    options: FaceDetectorOptions(
-      performanceMode: FaceDetectorMode.accurate,
-      enableTracking: false,
-    ),
-  );
 
   bool get isReady => _interpreter != null;
 
   Future<void> init() async {
     if (_interpreter != null) return;
     _interpreter = await Interpreter.fromAsset('assets/models/mobilefacenet.tflite');
+    print("🧠 TFLite model loaded successfully");
   }
 
   void dispose() {
-    _faceDetector.close();
     _interpreter?.close();
   }
 
   /// Takes the path of a captured photo, finds the face, and returns its normalized 192-d embedding.
+  /// Uses a dedicated FaceDetector per call to avoid stale state issues.
   Future<List<double>> extractEmbeddingFromImage(String imagePath) async {
     await init();
 
-    final inputImage = InputImage.fromFilePath(imagePath);
-    final faces = await _faceDetector.processImage(inputImage);
-
-    if (faces.isEmpty) {
-      throw FaceMlException('No face detected. Try again with better lighting and the face centered.');
-    }
-    if (faces.length > 1) {
-      throw FaceMlException('Multiple faces detected. Make sure only one face is in frame.');
-    }
-
-    final face = faces.first;
-
-    final bytes = await File(imagePath).readAsBytes();
-    img.Image? decoded = img.decodeImage(bytes);
-    if (decoded == null) {
-      throw FaceMlException('Could not read the captured image.');
-    }
-    decoded = img.bakeOrientation(decoded);
-
-    final cropped = _cropFace(decoded, face.boundingBox);
-    final resized = img.copyResize(
-      cropped,
-      width: inputSize,
-      height: inputSize,
+    // Create a fresh detector for each extraction to avoid stale state
+    final detector = FaceDetector(
+      options: FaceDetectorOptions(
+        performanceMode: FaceDetectorMode.accurate,
+        enableTracking: false,
+      ),
     );
 
-    final embedding = _runModel(resized);
-    return _l2Normalize(embedding);
+    try {
+      // Step 1: Read and decode the image with orientation baked in
+      final bytes = await File(imagePath).readAsBytes();
+      img.Image? decoded = img.decodeImage(bytes);
+      if (decoded == null) {
+        throw FaceMlException('Could not read the captured image.');
+      }
+      decoded = img.bakeOrientation(decoded);
+      print("📷 Image decoded: ${decoded.width}x${decoded.height}");
+
+      // Step 2: Detect face using the baked image saved to a temp file
+      // This ensures ML Kit and our pixel data see the exact same orientation
+      final tempDir = Directory.systemTemp;
+      final tempFile = File('${tempDir.path}/face_extract_${DateTime.now().millisecondsSinceEpoch}.jpg');
+      await tempFile.writeAsBytes(img.encodeJpg(decoded, quality: 95));
+
+      final inputImage = InputImage.fromFilePath(tempFile.path);
+      final faces = await detector.processImage(inputImage);
+
+      // Clean up temp file
+      try { await tempFile.delete(); } catch (_) {}
+
+      if (faces.isEmpty) {
+        throw FaceMlException('No face detected. Try again with better lighting and the face centered.');
+      }
+      if (faces.length > 1) {
+        throw FaceMlException('Multiple faces detected. Make sure only one face is in frame.');
+      }
+
+      final face = faces.first;
+      print("🎯 Face detected at: ${face.boundingBox} in ${decoded.width}x${decoded.height} image");
+
+      // Step 3: Crop the face with generous padding
+      final cropped = _cropFace(decoded, face.boundingBox);
+      print("✂️ Cropped face: ${cropped.width}x${cropped.height}");
+
+      final resized = img.copyResize(
+        cropped,
+        width: inputSize,
+        height: inputSize,
+        interpolation: img.Interpolation.linear,
+      );
+
+      // Step 4: Run through TFLite model
+      final embedding = _runModel(resized);
+      final normalized = _l2Normalize(embedding);
+      print("🔢 Embedding generated, first 5 values: ${normalized.take(5).toList()}");
+
+      return normalized;
+    } finally {
+      detector.close();
+    }
   }
 
   img.Image _cropFace(img.Image source, Rect box) {
-    final padW = box.width * 0.15;
-    final padH = box.height * 0.15;
+    // Use generous padding (25%) for better face context
+    final padW = box.width * 0.25;
+    final padH = box.height * 0.25;
 
     final left = (box.left - padW).round().clamp(0, source.width - 1);
     final top = (box.top - padH).round().clamp(0, source.height - 1);
@@ -134,7 +159,7 @@ class FaceMlService {
     return vec.map((v) => v / norm).toList();
   }
 
-  /// ✅ RESTORED: Cosine similarity between two already-normalized embeddings.
+  /// Cosine similarity between two already-normalized embeddings.
   double cosineSimilarity(List<double> a, List<double> b) {
     double dot = 0;
     final len = min(a.length, b.length);
@@ -164,32 +189,6 @@ class FaceMlService {
 
     if (bestId == null || bestScore < matchThreshold) return null;
     return MatchResult(id: bestId, name: bestName!, score: bestScore);
-  }
-}
-
-/// 💡 MOVED OUTSIDE: Cleaner, distinct controller for verification tasks
-class LoginVerificationController {
-  final FaceStorageService _storageService = FaceStorageService.instance;
-
-  Future<bool> checkInUserCredentials({
-    required String email,
-    required List<double> scannedFaceEmbedding,
-  }) async {
-    List<double>? registeredEmbedding = await _storageService.getEmbeddingByEmail(email);
-
-    if (registeredEmbedding == null) {
-      print("No user registration records matched this email profile.");
-      return false;
-    }
-
-    // Now cleanly references the restored similarity method
-    double similarityScore = FaceMlService.instance.cosineSimilarity(
-      scannedFaceEmbedding, 
-      registeredEmbedding,
-    );
-
-    print("Calculated facial similarity match index metric score: $similarityScore");
-    return similarityScore >= FaceMlService.matchThreshold; 
   }
 }
 
