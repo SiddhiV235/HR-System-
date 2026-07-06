@@ -39,7 +39,7 @@ Future<void> _scanFaceForRegistration() async {
 
     setState(() => _isLoading = true);
     try {
-      final result = await FaceMlService.instance.extractEmbeddingFromImage(imagePath);
+      final List<double> result = await FaceMlService.instance.extractEmbeddingFromImage(imagePath);
       
       // Check mounted state again after the async ML processing gap completes
       if (!mounted) return;
@@ -82,7 +82,7 @@ Future<void> _scanFaceForRegistration() async {
       password: password,
       faceEmbedding: _capturedFaceEmbedding!,
     );
-
+if (!mounted) return;
     setState(() => _isLoading = false);
 
     if (isSuccess) {
@@ -97,7 +97,7 @@ Future<void> _scanFaceForRegistration() async {
             actions: [
               TextButton(
                 onPressed: () {
-                  Navigator.pop(ctx);
+                  Navigator.of(ctx).pop();
                   // Redirect straight to the Login gateway screen
                   Navigator.pushReplacement(
                     context,

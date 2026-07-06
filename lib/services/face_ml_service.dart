@@ -23,7 +23,7 @@ class FaceMlService {
   // Set true temporarily while tuning — prints similarity scores to console
   static const bool debugLogging = true;
 
-  static const double matchThreshold = 0.72;
+  static const double matchThreshold = 0.68;
 
   Interpreter? _interpreter;
 

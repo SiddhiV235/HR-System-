@@ -1,3 +1,4 @@
+import 'package:face_attendance_app/services/face_ml_service.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
@@ -152,36 +153,47 @@ class _AttendanceScreenState extends State<AttendanceScreen> {
   }
 
   Future<void> _handleUpdateFace() async {
-    setState(() => _statusMessage = "Opening biometric scanner for re-registration...");
+  setState(() => _statusMessage = "Opening biometric scanner for re-registration...");
 
-    try {
-      final List<double>? newEmbedding = await Navigator.push<List<double>>(
-        context,
-        MaterialPageRoute(builder: (context) => const CameraCaptureScreen()),
-      );
+  try {
+    // Step 1: CameraCaptureScreen returns an image file path (String), not an embedding
+    final String? imagePath = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (context) => const CameraCaptureScreen(title: 'Update Face')),
+    );
 
-      if (!mounted) return;
+    if (!mounted) return;
 
-      if (newEmbedding == null) {
-        setState(() => _statusMessage = "Update face cancelled.");
-        return;
-      }
-
-      setState(() => _statusMessage = "Uploading new facial signature patterns...");
-
-      bool updateSuccess = await _storageService.updateFaceEmbedding(newEmbedding);
-
-      if (updateSuccess) {
-        _showSnack("Your new face biometric signature has been saved.", isError: false);
-      } else {
-        _showSnack("Could not save your new biometric scan.", isError: true);
-      }
-    } catch (e) {
-      _showSnack("Pipeline Error: ${e.toString()}", isError: true);
-    } finally {
-      _loadTodayStatus();
+    if (imagePath == null) {
+      setState(() => _statusMessage = "Update face cancelled.");
+      return;
     }
+
+    setState(() => _statusMessage = "Processing face signature...");
+
+    // Step 2: Convert the captured photo into an embedding
+    final List<double> newEmbedding =
+        await FaceMlService.instance.extractEmbeddingFromImage(imagePath);
+
+    if (!mounted) return;
+
+    setState(() => _statusMessage = "Uploading new facial signature patterns...");
+
+    bool updateSuccess = await _storageService.updateFaceEmbedding(newEmbedding);
+
+    if (updateSuccess) {
+      _showSnack("Your new face biometric signature has been saved.", isError: false);
+    } else {
+      _showSnack("Could not save your new biometric scan.", isError: true);
+    }
+  } on FaceMlException catch (e) {
+    _showSnack(e.message, isError: true);
+  } catch (e) {
+    _showSnack("Pipeline Error: ${e.toString()}", isError: true);
+  } finally {
+    if (mounted) _loadTodayStatus();
   }
+}
 
   void _showSnack(String message, {bool isError = false}) {
     ScaffoldMessenger.of(context).showSnackBar(
