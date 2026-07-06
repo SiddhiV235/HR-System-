@@ -4,7 +4,13 @@ allprojects {
         mavenCentral()
     }
 }
-
+plugins {
+    // ✅ FIXED: Removed hardcoded versions to prevent version mismatch conflicts
+    id("com.android.application") apply false
+    id("com.android.library") apply false
+    id("org.jetbrains.kotlin.android") apply false
+    id("dev.flutter.flutter-gradle-plugin") apply false
+}
 val newBuildDir: Directory =
     rootProject.layout.buildDirectory
         .dir("../../build")

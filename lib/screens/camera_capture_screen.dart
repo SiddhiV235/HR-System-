@@ -1,8 +1,6 @@
 import 'dart:io';
 import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
-// 💡 IMPORTANT: Make sure this path correctly imports your machine learning service!
-import '../services/face_ml_service.dart'; 
 
 class CameraCaptureScreen extends StatefulWidget {
   final String title;
@@ -18,8 +16,6 @@ class _CameraCaptureScreenState extends State<CameraCaptureScreen> {
   bool _busy = false;
   String? _error;
 
-final FaceMlService _mlService = FaceMlService.instance; //  Use the singleton instance // Instantiate your working ML/TFLite service instance here
-  
   @override
   void initState() {
     super.initState();
@@ -44,13 +40,10 @@ final FaceMlService _mlService = FaceMlService.instance; //  Use the singleton i
       );
       _initFuture = _controller!.initialize();
       await _initFuture;
-      
-      // Initialize/Load your TFLite models before tracking frames
-      await _mlService.init(); 
 
       if (mounted) setState(() {});
     } catch (e) {
-      setState(() => _error = 'Camera error: $e');
+      setState(() => _error = 'Camera initialization error: $e');
     }
   }
 
@@ -64,23 +57,16 @@ final FaceMlService _mlService = FaceMlService.instance; //  Use the singleton i
     });
 
     try {
-      // 1. Capture the raw photo file context
+      // 1. Capture the raw photo file
       final XFile file = await _controller!.takePicture();
       
-      // 2. Initialize the ML Kit interpreter engine
-      await FaceMlService.instance.init();
-
-      // 3. Process image path into a normalized 192-length double vector array
-      final List<double> faceEmbedding = await _mlService.extractEmbeddingFromImage(file.path);
-
-      // 4. Safely return the vector list array back down to your screens
+      // 2. Return the file path back to the calling screen safely
       if (mounted) {
-        Navigator.of(context).pop(faceEmbedding);
+        Navigator.of(context).pop(file.path);
       }
     } catch (e) {
       setState(() {
-        // Automatically catches FaceMlException errors cleanly
-        _error = e.toString(); 
+        _error = "Capture failed: ${e.toString()}"; 
         _busy = false;
       });
     }
@@ -94,7 +80,6 @@ final FaceMlService _mlService = FaceMlService.instance; //  Use the singleton i
 
   @override
   Widget build(BuildContext context) {
-    // UI Theme Config Colors
     final Color brandOrange = const Color(0xFFFF6B00);
     final Color brandOffWhite = const Color(0xFFF9F9F6);
     final Color textDark = const Color(0xFF1F2937);
@@ -153,8 +138,8 @@ final FaceMlService _mlService = FaceMlService.instance; //  Use the singleton i
                                     height: 16,
                                     child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                                   )
-                                : const Icon(Icons.face_retouching_natural_rounded),
-                            label: Text(_busy ? 'Analyzing Matrix...' : 'Scan My Face', style: const TextStyle(fontWeight: FontWeight.bold)),
+                                : const Icon(Icons.camera_alt_rounded),
+                            label: Text(_busy ? 'Capturing Frame...' : 'Take Photo', style: const TextStyle(fontWeight: FontWeight.bold)),
                           ),
                         ),
                       ],

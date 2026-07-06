@@ -35,7 +35,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
       performanceMode: FaceDetectorMode.accurate,
       enableClassification: true,
       enableTracking: true,
-      minFaceSize: 0.15,
+      minFaceSize: 0.20, // Slightly increased to ensure face is close enough for a clean embedding crop
     ),
   );
 
@@ -80,7 +80,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
 
       _controller = CameraController(
         _camera!,
-        ResolutionPreset.medium,
+        ResolutionPreset.medium, // 480x360+ optimized resolution balancing frame rate performance and crop clarity
         enableAudio: false,
         imageFormatGroup: Platform.isAndroid
             ? ImageFormatGroup.nv21
@@ -95,13 +95,14 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
 
       if (mounted) setState(() {});
     } catch (e) {
-      if (mounted) setState(() => _error = 'Camera error: $e');
+      if (mounted) setState(() => _error = 'Camera initialization error: $e');
     }
   }
 
   Future<void> _onCameraFrame(CameraImage image) async {
     if (_busy || _isProcessingFrame || _camera == null) return;
 
+    // Drop frames strategically to allow the CPU thread enough time to calculate without UI lag
     _frameSkipCounter++;
     if (_frameSkipCounter % 3 != 0) return;
 
@@ -148,7 +149,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
 
       final face = faces.first;
 
-      // Phase 1: Liveness detection
+      // Phase 1: Live movement and blink verification checks
       if (!_livenessConfirmed) {
         final progress = _liveness.processFace(face);
 
@@ -171,7 +172,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
         return;
       }
 
-      // Phase 2: Wait for frontal face before capture
+      // Phase 2: Confirm clean frontal alignment before execution
       final yaw = face.headEulerAngleY;
       if (yaw != null && yaw.abs() < _maxFrontalYaw) {
         _frontalFrameCount++;
@@ -187,8 +188,8 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
         });
 
         if (_frontalFrameCount >= _requiredFrontalFrames) {
-          // Defer capture out of the stream callback context
           _busy = true;
+          // Defer capture to safely execute outside the stream event frame loop context
           Future.microtask(() => _captureAndReturn());
         }
       } else {
@@ -205,7 +206,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
         });
       }
     } catch (_) {
-      // Ignore transient frame processing errors.
+      // Catch transient exceptions thrown by hardware skips safely
     } finally {
       _isProcessingFrame = false;
     }
@@ -229,20 +230,20 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
     }
 
     try {
-      // Step 1: Stop the live stream so camera hardware can take a hi-res still
+      // Step 1: Stop live frame mapping loops before triggering hardware shutter
       await _controller!.stopImageStream();
 
-      // Step 2: Let auto-exposure/focus stabilize
-      await Future.delayed(const Duration(milliseconds: 400));
+      // Step 2: Give auto-exposure sensors explicit time to settle down
+      await Future.delayed(const Duration(milliseconds: 350));
 
-      // Step 3: Capture
+      // Step 3: Write still image out to cache directory path safely
       final XFile file = await _controller!.takePicture();
       print("📸 Captured verification image: ${file.path}");
 
-      // Step 4: Extract embedding from the captured still
+      // Step 4: Map file path directly into standard 128 dimension vector
       final List<double> embedding =
           await _mlService.extractEmbeddingFromImage(file.path);
-      print("✅ Embedding extracted (${embedding.length} dimensions), first 5: ${embedding.take(5).toList()}");
+      print("✅ Embedding extracted successfully");
 
       if (mounted) {
         Navigator.of(context).pop(embedding);
@@ -251,7 +252,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
       print("❌ Camera Pipeline Capture Failure: $e");
       if (mounted) {
         setState(() {
-          _error = "Recognition frame extraction failed: $e";
+          _error = "Recognition framework mapping failed: $e";
           _busy = false;
           _livenessConfirmed = false;
           _frontalFrameCount = 0;
@@ -259,6 +260,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
 
         _liveness.reset();
         try {
+          // Restart image streams automatically if hardware fails a photo snap
           await _controller?.startImageStream(_onCameraFrame);
         } catch (_) {}
       }
@@ -269,36 +271,24 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
     final rotation = _rotationFromSensor(camera.sensorOrientation);
     if (rotation == null) return null;
 
-    if (Platform.isAndroid) {
-      if (image.planes.length != 1) return null;
-      return InputImage.fromBytes(
-        bytes: image.planes.first.bytes,
-        metadata: InputImageMetadata(
-          size: Size(image.width.toDouble(), image.height.toDouble()),
-          rotation: rotation,
-          format: InputImageFormat.nv21,
-          bytesPerRow: image.planes.first.bytesPerRow,
-        ),
-      );
-    }
+    final format = Platform.isAndroid ? InputImageFormat.nv21 : InputImageFormat.bgra8888;
+    if (image.planes.isEmpty) return null;
+    
+    final plane = image.planes.first;
 
-    if (image.planes.length != 1) return null;
     return InputImage.fromBytes(
-      bytes: image.planes.first.bytes,
+      bytes: plane.bytes,
       metadata: InputImageMetadata(
         size: Size(image.width.toDouble(), image.height.toDouble()),
         rotation: rotation,
-        format: InputImageFormat.bgra8888,
-        bytesPerRow: image.planes.first.bytesPerRow,
+        format: format,
+        bytesPerRow: plane.bytesPerRow,
       ),
     );
   }
 
   InputImageRotation? _rotationFromSensor(int sensorOrientation) {
-    if (Platform.isAndroid) {
-      return InputImageRotationValue.fromRawValue(sensorOrientation);
-    }
-    return InputImageRotation.rotation0deg;
+    return InputImageRotationValue.fromRawValue(sensorOrientation) ?? InputImageRotation.rotation0deg;
   }
 
   @override
@@ -328,12 +318,12 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
       body: _error != null
           ? _buildErrorState(brandOrange, textDark)
           : _controller == null || _initFuture == null
-              ? Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(brandOrange)))
+              ? const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(brandOrange)))
               : FutureBuilder(
                   future: _initFuture,
                   builder: (context, snapshot) {
                     if (snapshot.connectionState != ConnectionState.done) {
-                      return Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(brandOrange)));
+                      return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation(brandOrange)));
                     }
                     return Stack(
                       fit: StackFit.expand,
@@ -345,9 +335,9 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
                               begin: Alignment.topCenter,
                               end: Alignment.bottomCenter,
                               colors: [
-                                Colors.black.withValues(alpha: 0.55),
+                                Colors.black.withOpacity(0.55),
                                 Colors.transparent,
-                                Colors.black.withValues(alpha: 0.7),
+                                Colors.black.withOpacity(0.7),
                               ],
                             ),
                           ),
@@ -410,7 +400,7 @@ class _FaceVerifyScreenState extends State<FaceVerifyScreen> {
                                 const SizedBox(height: 8),
                                 Text(
                                   'Matching face…',
-                                  style: TextStyle(color: brandOffWhite.withValues(alpha: 0.9)),
+                                  style: TextStyle(color: brandOffWhite.withOpacity(0.9)),
                                 ),
                               ],
                             ],

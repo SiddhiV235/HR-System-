@@ -6,7 +6,6 @@ import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
 import 'package:image/image.dart' as img;
 import 'package:tflite_flutter/tflite_flutter.dart';
 
-/// Thrown for any expected failure during face extraction
 class FaceMlException implements Exception {
   final String message;
   FaceMlException(this.message);
@@ -14,7 +13,6 @@ class FaceMlException implements Exception {
   String toString() => message;
 }
 
-/// Handles Face Detection, Cropping, and TFLite embeddings.
 class FaceMlService {
   FaceMlService._internal();
   static final FaceMlService instance = FaceMlService._internal();
@@ -22,8 +20,10 @@ class FaceMlService {
   static const int inputSize = 112;
   static const int embeddingSize = 192;
 
-  /// Cosine-similarity threshold above which two embeddings are considered the same person.
-  static const double matchThreshold = 0.5;
+  // Set true temporarily while tuning — prints similarity scores to console
+  static const bool debugLogging = true;
+
+  static const double matchThreshold = 0.72;
 
   Interpreter? _interpreter;
 
@@ -32,73 +32,81 @@ class FaceMlService {
   Future<void> init() async {
     if (_interpreter != null) return;
     _interpreter = await Interpreter.fromAsset('assets/models/mobilefacenet.tflite');
-    print("🧠 TFLite model loaded successfully");
+    print("TFLite model loaded successfully");
   }
 
   void dispose() {
     _interpreter?.close();
   }
 
-  /// Takes the path of a captured photo, finds the face, and returns its normalized 192-d embedding.
-  /// Uses a dedicated FaceDetector per call to avoid stale state issues.
   Future<List<double>> extractEmbeddingFromImage(String imagePath) async {
     await init();
 
-    // Create a fresh detector for each extraction to avoid stale state
     final detector = FaceDetector(
       options: FaceDetectorOptions(
         performanceMode: FaceDetectorMode.accurate,
         enableTracking: false,
+        enableLandmarks: true, // ✅ needed for eye alignment
       ),
     );
 
     try {
-      // Step 1: Read and decode the image with orientation baked in
       final bytes = await File(imagePath).readAsBytes();
       img.Image? decoded = img.decodeImage(bytes);
       if (decoded == null) {
         throw FaceMlException('Could not read the captured image.');
       }
       decoded = img.bakeOrientation(decoded);
-      print("📷 Image decoded: ${decoded.width}x${decoded.height}");
 
-      // Step 2: Detect face using the baked image saved to a temp file
-      // This ensures ML Kit and our pixel data see the exact same orientation
-      final tempDir = Directory.systemTemp;
-      final tempFile = File('${tempDir.path}/face_extract_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await tempFile.writeAsBytes(img.encodeJpg(decoded, quality: 95));
-
-      final inputImage = InputImage.fromFilePath(tempFile.path);
-      final faces = await detector.processImage(inputImage);
-
-      // Clean up temp file
-      try { await tempFile.delete(); } catch (_) {}
-
-      if (faces.isEmpty) {
-        throw FaceMlException('No face detected. Try again with better lighting and the face centered.');
+      // --- Pass 1: detect face + landmarks on the raw image ---
+      final firstPass = await _detectFaces(detector, decoded);
+      if (firstPass.isEmpty) {
+        throw FaceMlException('No face detected. Try again with better lighting.');
       }
-      if (faces.length > 1) {
-        throw FaceMlException('Multiple faces detected. Make sure only one face is in frame.');
+      if (firstPass.length > 1) {
+        throw FaceMlException('Multiple faces detected. Keep only one face in view.');
       }
 
-      final face = faces.first;
-      print("🎯 Face detected at: ${face.boundingBox} in ${decoded.width}x${decoded.height} image");
+      Face face = firstPass.first;
+      img.Image workingImage = decoded;
 
-      // Step 3: Crop the face with generous padding
-      final cropped = _cropFace(decoded, face.boundingBox);
-      print("✂️ Cropped face: ${cropped.width}x${cropped.height}");
+      // --- Alignment: rotate so the eyes are level ---
+      final leftEye = face.landmarks[FaceLandmarkType.leftEye]?.position;
+      final rightEye = face.landmarks[FaceLandmarkType.rightEye]?.position;
+
+      if (leftEye != null && rightEye != null) {
+        final dx = (rightEye.x - leftEye.x).toDouble();
+        final dy = (rightEye.y - leftEye.y).toDouble();
+        final angleDeg = atan2(dy, dx) * 180 / pi;
+
+        if (angleDeg.abs() > 1.0) {
+          try {
+            // Negative sign corrects tilt direction (image coords: y grows downward)
+            final rotated = img.copyRotate(decoded, angle: -angleDeg);
+            final secondPass = await _detectFaces(detector, rotated);
+            if (secondPass.length == 1) {
+              workingImage = rotated;
+              face = secondPass.first;
+            }
+            // If re-detection fails after rotation, silently fall back to
+            // the original unrotated image + face instead of throwing.
+          } catch (_) {
+            // fall back to unrotated
+          }
+        }
+      }
+
+      final cropped = _cropFaceWithMargin(workingImage, face.boundingBox, marginRatio: 0.25);
 
       final resized = img.copyResize(
         cropped,
         width: inputSize,
         height: inputSize,
-        interpolation: img.Interpolation.linear,
+        interpolation: img.Interpolation.cubic,
       );
 
-      // Step 4: Run through TFLite model
       final embedding = _runModel(resized);
       final normalized = _l2Normalize(embedding);
-      print("🔢 Embedding generated, first 5 values: ${normalized.take(5).toList()}");
 
       return normalized;
     } finally {
@@ -106,15 +114,33 @@ class FaceMlService {
     }
   }
 
-  img.Image _cropFace(img.Image source, Rect box) {
-    // Use generous padding (25%) for better face context
-    final padW = box.width * 0.25;
-    final padH = box.height * 0.25;
+  /// Writes [image] to a temp file and runs ML Kit face detection on it.
+  Future<List<Face>> _detectFaces(FaceDetector detector, img.Image image) async {
+    final tempDir = Directory.systemTemp;
+    final tempFile = File(
+      '${tempDir.path}/face_extract_${DateTime.now().microsecondsSinceEpoch}.jpg',
+    );
+    await tempFile.writeAsBytes(img.encodeJpg(image, quality: 95));
+    try {
+      final inputImage = InputImage.fromFilePath(tempFile.path);
+      return await detector.processImage(inputImage);
+    } finally {
+      try {
+        await tempFile.delete();
+      } catch (_) {}
+    }
+  }
 
-    final left = (box.left - padW).round().clamp(0, source.width - 1);
-    final top = (box.top - padH).round().clamp(0, source.height - 1);
-    final right = (box.right + padW).round().clamp(left + 1, source.width);
-    final bottom = (box.bottom + padH).round().clamp(top + 1, source.height);
+  /// Crops the face box with extra margin on every side so the model sees
+  /// forehead/chin/ears context instead of a razor-tight crop.
+  img.Image _cropFaceWithMargin(img.Image source, Rect box, {double marginRatio = 0.25}) {
+    final marginX = box.width * marginRatio;
+    final marginY = box.height * marginRatio;
+
+    final left = (box.left - marginX).round().clamp(0, source.width - 1);
+    final top = (box.top - marginY).round().clamp(0, source.height - 1);
+    final right = (box.right + marginX).round().clamp(left + 1, source.width);
+    final bottom = (box.bottom + marginY).round().clamp(top + 1, source.height);
 
     return img.copyCrop(
       source,
@@ -135,9 +161,9 @@ class FaceMlService {
           (x) {
             final pixel = faceImage.getPixel(x, y);
             return [
-              (pixel.r - 127.5) / 128.0,
-              (pixel.g - 127.5) / 128.0,
-              (pixel.b - 127.5) / 128.0,
+              (pixel.r - 127.5) / 127.5,
+              (pixel.g - 127.5) / 127.5,
+              (pixel.b - 127.5) / 127.5,
             ];
           },
         ),
@@ -159,17 +185,18 @@ class FaceMlService {
     return vec.map((v) => v / norm).toList();
   }
 
-  /// Cosine similarity between two already-normalized embeddings.
   double cosineSimilarity(List<double> a, List<double> b) {
     double dot = 0;
     final len = min(a.length, b.length);
     for (int i = 0; i < len; i++) {
       dot += a[i] * b[i];
     }
+    if (debugLogging) {
+      print('🔬 cosineSimilarity = $dot');
+    }
     return dot;
   }
 
-  /// Compares [embedding] against candidate lists
   MatchResult? findBestMatch(
     List<double> embedding,
     List<({String id, String name, List<double> embedding})> candidates,

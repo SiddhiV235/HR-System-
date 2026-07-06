@@ -4,7 +4,7 @@ class LocationService {
   // Define your target Office Coordinates (Example: Mumbai coordinates)
   static const double officeLatitude = 19.151266317528332;
   static const double officeLongitude = 72.992270021164077;
-  static const double allowedRadiusInMeters = 300.0; // 300-meter boundary
+  static const double allowedRadiusInMeters = 100.0; // 100-meter boundary
 
   /// Checks permissions and returns true if the employee is within the office boundary
   static Future<bool> isEmployeeAtOffice() async {

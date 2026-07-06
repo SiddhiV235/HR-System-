@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'camera_capture_screen.dart';
 import 'login_screen.dart';
 import '../services/face_auth_controller.dart';
+import '../services/face_ml_service.dart';
 
 
 class RegisterScreen extends StatefulWidget {
@@ -26,22 +27,35 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final Color textDark = const Color(0xFF1F2937);
 
   /// Step 1: Open the face scanning camera layer to get the 192 float array
- Future<void> _scanFaceForRegistration() async {
-    final List<double>? result = await Navigator.push<List<double>>(
+
+Future<void> _scanFaceForRegistration() async {
+    final String? imagePath = await Navigator.push<String>(
       context,
-      MaterialPageRoute(builder: (context) => const CameraCaptureScreen()),
+      MaterialPageRoute(builder: (context) => const CameraCaptureScreen(title: 'Register Face')),
     );
 
-    // 💡 FIX: Guard the build context gap securely
-    if (!mounted) return; 
+    // Guard against an unmounted widget before proceeding
+    if (!mounted || imagePath == null) return; 
 
-    if (result != null) {
+    setState(() => _isLoading = true);
+    try {
+      final result = await FaceMlService.instance.extractEmbeddingFromImage(imagePath);
+      
+      // Check mounted state again after the async ML processing gap completes
+      if (!mounted) return;
+
       setState(() {
         _capturedFaceEmbedding = result;
       });
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("Face signature captured successfully!")),
       );
+    } catch (e) {
+      _showErrorSnackBar("Failed to extract face features: $e");
+    } finally {
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
     }
   }
 
